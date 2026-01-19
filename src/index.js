@@ -20,6 +20,8 @@ import https from "https";
 import crypto from "crypto";
 import { PassThrough } from "stream";
 
+const BINANCE_DATA_BASE_URL = "https://data.binance.vision";
+
 program
   .option(
     "-d, --date <date...>",
@@ -233,7 +235,7 @@ try {
   for (const symbol of params.symbols) {
     for (const interval of params.intervals ?? [null]) {
       for (const date of dates) {
-        let url = "https://data.binance.vision/data";
+        let url = BINANCE_DATA_BASE_URL + "/data";
         function addToPath(str) {
           url += "/" + str;
         }
@@ -335,7 +337,7 @@ try {
    */
   async function requestData(url) {
     const fileName = url.match(/[^/]*\.zip$/)[0];
-    const urlPath = url.replace('https://data.binance.vision/', '');
+    const urlPath = url.replace(BINANCE_DATA_BASE_URL + '/', '');
     const fileVerified = join(outputPath, urlPath);
     const fileDir = dirname(fileVerified);
     const fileUnverified = fileVerified.replace(/\.zip$/, "_UNVERIFIED.zip");
