@@ -2,8 +2,7 @@ name: Weekly Build Templates
 
 on:
   schedule: 
-    # 每周一 UTC 时间 00:00 运行
-    - cron: '0 0 * * 1'
+    - cron: '0 20 1 * *'
   workflow_dispatch:  # 允许手动触发
 
 jobs: 
