@@ -110,7 +110,16 @@ This command downloads `monthly` data for two `symbols` and all `intervals` from
 
 ### Output directory
 
-By default, all data is saved mirroring the Binance URL relative to your current directory. For example, a file from `https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-01.zip` will be saved to `./data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-01.zip`. You may pass `-o` or `--output` followed by a relative or absolute path to change the root directory. If a file already exists at the expected path, it will be skipped.
+By default, all data is saved mirroring the Binance URL relative to your current directory. For example, a file from:
+```
+https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-01.zip
+```
+will be saved to:
+```
+./data/spot/daily/klines/BTCUSDT/1h/BTCUSDT-1h-2021-01-01.zip
+```
+
+You may pass `-o` or `--output` followed by a relative or absolute path to change the root directory. If a file already exists at the expected path, it will be skipped.
 
 Data is loaded with a stream. Until the file is fully downloaded and verified, it will look like this: `<symbol>...UNVERIFIED.zip`.
 
