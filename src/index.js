@@ -348,8 +348,12 @@ try {
       // File already exists, skip download
       printResult(logSymbols.info, fileName, "already exists");
       return;
-    } catch {
-      // File doesn't exist, continue with download
+    } catch (error) {
+      // File doesn't exist (ENOENT) or other access errors, continue with download
+      if (error.code && error.code !== 'ENOENT') {
+        // Log unexpected errors but continue anyway
+        console.error(`Warning: Error checking file ${fileName}: ${error.message}`);
+      }
     }
 
     // Create directory structure if it doesn't exist
