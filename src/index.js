@@ -2,7 +2,7 @@ import fs, { constants } from "fs/promises";
 import { createWriteStream } from "fs";
 import logSymbols from "log-symbols";
 import { Option, program } from "commander";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import { generateDates, getList } from "./utils.js";
 import { byDayRegex, byMonthRegex } from "./validateDateRegex.js";
 import { IncorrectParamError } from "./customErrors.js";
@@ -19,6 +19,8 @@ import ora from "ora";
 import https from "https";
 import crypto from "crypto";
 import { PassThrough } from "stream";
+
+const BINANCE_DATA_BASE_URL = "https://data.binance.vision";
 
 program
   .option(
@@ -233,7 +235,7 @@ try {
   for (const symbol of params.symbols) {
     for (const interval of params.intervals ?? [null]) {
       for (const date of dates) {
-        let url = "https://data.binance.vision/data";
+        let url = BINANCE_DATA_BASE_URL + "/data";
         function addToPath(str) {
           url += "/" + str;
         }
@@ -267,8 +269,9 @@ try {
     success: 0,
     noData: 0,
     fail: 0,
+    skipped: 0,
     done: function () {
-      return this.success + this.noData + this.fail;
+      return this.success + this.noData + this.fail + this.skipped;
     },
   };
   const spinner = ora();
@@ -278,6 +281,8 @@ try {
       progressCount.success++;
     } else if (symbol === logSymbols.warning) {
       progressCount.noData++;
+    } else if (symbol === logSymbols.info) {
+      progressCount.skipped++;
     } else {
       progressCount.fail++;
     }
@@ -305,16 +310,21 @@ try {
       Promise.all(promises).then(() => {
         if (progressCount.success === requestCount){
           console.log("DONE");
+        } else if (progressCount.success + progressCount.skipped === requestCount){
+          console.log("DONE");
         } else {
           let result = `Downloaded: ${progressCount.success}/${requestCount} files`;
           if (progressCount.noData) {
             result += `; not found: ${progressCount.noData}/${requestCount} files`;
           }
+          if (progressCount.skipped) {
+            result += `; skipped: ${progressCount.skipped}/${requestCount} files`;
+          }
           if (progressCount.fail) {
             result += `; failed to complete: ${progressCount.fail}/${requestCount} files`;
           }
           console.log(result);
-          if (progressCount.success === 0) {
+          if (progressCount.fail > 0 || (progressCount.success === 0 && progressCount.skipped === 0)) {
             process.exitCode = 1;
           }
         }
@@ -325,10 +335,29 @@ try {
   /**
    * fetch data from each link
    */
-  function requestData(url) {
+  async function requestData(url) {
     const fileName = url.match(/[^/]*\.zip$/)[0];
-    const fileVerified = join(outputPath, fileName);
+    const urlPath = url.replace(BINANCE_DATA_BASE_URL + '/', '');
+    const fileVerified = join(outputPath, urlPath);
+    const fileDir = dirname(fileVerified);
     const fileUnverified = fileVerified.replace(/\.zip$/, "_UNVERIFIED.zip");
+
+    // Check if file already exists
+    try {
+      await fs.access(fileVerified, constants.F_OK);
+      // File already exists, skip download
+      printResult(logSymbols.info, fileName, "already exists");
+      return;
+    } catch (error) {
+      // File doesn't exist (ENOENT) or other access errors, continue with download
+      if (error.code && error.code !== 'ENOENT') {
+        // Log unexpected errors but continue anyway
+        console.error(`Warning: Error checking file ${fileName}: ${error.message}`);
+      }
+    }
+
+    // Create directory structure if it doesn't exist
+    await fs.mkdir(fileDir, { recursive: true });
 
     const sha256 = crypto.createHash("sha256");
 

@@ -49,16 +49,42 @@ describe.concurrent(
             { killSignal: "SIGKILL" }
           );
         }
+        // Build the expected path based on the URL structure
+        const byDay = test.date.length > 7;
+        let pathParts = ['data'];
+        
+        // Add product path segment
+        if (test.product === 'usd-m') {
+          pathParts.push('futures', 'um');
+        } else if (test.product === 'coin-m') {
+          pathParts.push('futures', 'cm');
+        } else {
+          pathParts.push(test.product);
+        }
+        
+        // Add daily/monthly segment
+        pathParts.push(byDay ? 'daily' : 'monthly');
+        
+        // Add data type
+        pathParts.push(test.dataType);
+        
+        // Add symbol
+        pathParts.push(test.symbol.toUpperCase());
+        
+        // Add interval if applicable
+        if (datatypesWithInterval.includes(test.dataType)) {
+          pathParts.push(test.interval);
+        }
+        
+        // Add filename
+        const fileName = `${test.symbol.toUpperCase()}-${
+          datatypesWithInterval.includes(test.dataType)
+            ? test.interval
+            : test.dataType
+        }-${test.date}(?:_UNVERIFIED)?\\.zip`;
+        
         const expectedFilePath = new RegExp(
-          join(
-            resultDir,
-            endpoint,
-            `${test.symbol.toUpperCase()}-${
-              datatypesWithInterval.includes(test.dataType)
-                ? test.interval
-                : test.dataType
-            }-${test.date}(?:_UNVERIFIED)?\\.zip`
-          )
+          join(resultDir, endpoint, ...pathParts, fileName)
         );
         const waitForFile = new Promise((resolve) => {
           watcher.on("change", async (path) => {
