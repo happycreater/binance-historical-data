@@ -308,6 +308,8 @@ try {
       Promise.all(promises).then(() => {
         if (progressCount.success === requestCount){
           console.log("DONE");
+        } else if (progressCount.success + progressCount.skipped === requestCount){
+          console.log("DONE");
         } else {
           let result = `Downloaded: ${progressCount.success}/${requestCount} files`;
           if (progressCount.noData) {
@@ -320,7 +322,7 @@ try {
             result += `; failed to complete: ${progressCount.fail}/${requestCount} files`;
           }
           console.log(result);
-          if (progressCount.success === 0) {
+          if (progressCount.fail > 0 || (progressCount.success === 0 && progressCount.skipped === 0)) {
             process.exitCode = 1;
           }
         }
