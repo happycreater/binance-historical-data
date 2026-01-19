@@ -40,7 +40,7 @@ program
   )
   .option(
     "-o, --output-path <path>",
-    "path to save the data to. Current directory is used by default"
+    "path to save the data to. Current directory is used by default, dir will be create like url."
   )
   .addOption(
     new Option("-P, --parallel <num>", "number of files to download at a time")
