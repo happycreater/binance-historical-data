@@ -3,3 +3,4 @@ data/
 /bin/
 /__tests__/binance-fetch-result/*
 !/__tests__/binance-fetch-result/.gitignore
+.ipynb_checkpoints
