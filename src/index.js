@@ -2,7 +2,7 @@ import fs, { constants } from "fs/promises";
 import { createWriteStream } from "fs";
 import logSymbols from "log-symbols";
 import { Option, program } from "commander";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import { generateDates, getList } from "./utils.js";
 import { byDayRegex, byMonthRegex } from "./validateDateRegex.js";
 import { IncorrectParamError } from "./customErrors.js";
@@ -267,8 +267,9 @@ try {
     success: 0,
     noData: 0,
     fail: 0,
+    skipped: 0,
     done: function () {
-      return this.success + this.noData + this.fail;
+      return this.success + this.noData + this.fail + this.skipped;
     },
   };
   const spinner = ora();
@@ -278,6 +279,8 @@ try {
       progressCount.success++;
     } else if (symbol === logSymbols.warning) {
       progressCount.noData++;
+    } else if (symbol === logSymbols.info) {
+      progressCount.skipped++;
     } else {
       progressCount.fail++;
     }
@@ -310,6 +313,9 @@ try {
           if (progressCount.noData) {
             result += `; not found: ${progressCount.noData}/${requestCount} files`;
           }
+          if (progressCount.skipped) {
+            result += `; skipped: ${progressCount.skipped}/${requestCount} files`;
+          }
           if (progressCount.fail) {
             result += `; failed to complete: ${progressCount.fail}/${requestCount} files`;
           }
@@ -325,10 +331,25 @@ try {
   /**
    * fetch data from each link
    */
-  function requestData(url) {
+  async function requestData(url) {
     const fileName = url.match(/[^/]*\.zip$/)[0];
-    const fileVerified = join(outputPath, fileName);
+    const urlPath = url.replace('https://data.binance.vision/', '');
+    const fileVerified = join(outputPath, urlPath);
+    const fileDir = dirname(fileVerified);
     const fileUnverified = fileVerified.replace(/\.zip$/, "_UNVERIFIED.zip");
+
+    // Check if file already exists
+    try {
+      await fs.access(fileVerified, constants.F_OK);
+      // File already exists, skip download
+      printResult(logSymbols.info, fileName, "already exists");
+      return;
+    } catch {
+      // File doesn't exist, continue with download
+    }
+
+    // Create directory structure if it doesn't exist
+    await fs.mkdir(fileDir, { recursive: true });
 
     const sha256 = crypto.createHash("sha256");
 
