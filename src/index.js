@@ -341,18 +341,30 @@ try {
     const fileVerified = join(outputPath, urlPath);
     const fileDir = dirname(fileVerified);
     const fileUnverified = fileVerified.replace(/\.zip$/, "_UNVERIFIED.zip");
+    const fileDone = fileVerified + ".done";
 
-    // Check if file already exists
+    // Check if file already exists (zip or .done)
     try {
       await fs.access(fileVerified, constants.F_OK);
       // File already exists, skip download
       printResult(logSymbols.info, fileName, "already exists");
       return;
     } catch (error) {
+      if (error.code && error.code !== 'ENOENT') {
+        console.error(`Warning: Error checking file ${fileName}: ${error.message}`);
+      }
+    }
+
+    try {
+      await fs.access(fileDone, constants.F_OK);
+      // File already marked as done, skip download
+      printResult(logSymbols.info, fileName, "already exists (.done)");
+      return;
+    } catch (error) {
       // File doesn't exist (ENOENT) or other access errors, continue with download
       if (error.code && error.code !== 'ENOENT') {
         // Log unexpected errors but continue anyway
-        console.error(`Warning: Error checking file ${fileName}: ${error.message}`);
+        console.error(`Warning: Error checking file ${fileDone}: ${error.message}`);
       }
     }
 
