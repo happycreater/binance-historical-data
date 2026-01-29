@@ -50,6 +50,12 @@ Download `daily` `klines` data for `spot` market:
 binance-fetch -d 2020-01-01 -p spot -t klines -s btcusdt -i 1h
 ```
 
+If `--symbols (-s)` is not provided, the CLI will fetch all available symbols for the selected product using the Binance API. You can also use wildcards such as `*USDT` to download all symbols matching the pattern:
+
+```shell
+binance-fetch -d 2024-01-01 -p spot -t klines -s "*USDT" -i 1h
+```
+
 `YYYY-MM-DD` date format is used for `daily` data. Use `YYYY-MM` for `monthly` data.
 
 To get data for a range of `dates`, provide two `date` strings separated by a space. Multiple `symbols` and `intervals` can also be provided separated by a space.
@@ -122,6 +128,8 @@ will be saved to:
 You may pass `-o` or `--output` followed by a relative or absolute path to change the root directory. If a file already exists at the expected path, it will be skipped.
 
 Data is loaded with a stream. Until the file is fully downloaded and verified, it will look like this: `<symbol>...UNVERIFIED.zip`.
+
+If the download returns a 404 or no data is found, the URL path is stored in a `missing.csv` file at the root of the output directory. Subsequent runs will skip any entries already listed in this file.
 
 ### Concurrency
 

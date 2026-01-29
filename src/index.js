@@ -21,6 +21,64 @@ import crypto from "crypto";
 import { PassThrough } from "stream";
 
 const BINANCE_DATA_BASE_URL = "https://data.binance.vision";
+const MISSING_FILES_CSV = "missing.csv";
+const SYMBOLS_API = {
+  spot: "https://api.binance.com/api/v3/exchangeInfo",
+  "usd-m": "https://fapi.binance.com/fapi/v1/exchangeInfo",
+  "coin-m": "https://dapi.binance.com/dapi/v1/exchangeInfo",
+  option: "https://eapi.binance.com/eapi/v1/exchangeInfo",
+};
+
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          data += chunk.toString();
+        });
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(
+              new Error(`HTTP ${res.statusCode} when requesting ${url}`)
+            );
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      })
+      .on("error", reject);
+  });
+}
+
+async function fetchSymbols(product) {
+  const url = SYMBOLS_API[product];
+  if (!url) {
+    throw new IncorrectParamError(
+      `Unsupported product for symbol lookup: '${product}'`
+    );
+  }
+  const payload = await fetchJson(url);
+  if (!payload.symbols || !Array.isArray(payload.symbols)) {
+    throw new Error("Unexpected symbol payload from Binance API");
+  }
+  return payload.symbols
+    .map((entry) => entry.symbol)
+    .filter((symbol) => typeof symbol === "string");
+}
+
+function hasWildcard(value) {
+  return value.includes("*");
+}
+
+function buildWildcardRegex(pattern) {
+  const escaped = pattern.replace(/[-/\\^$+?.()|[\]{}]/g, "\\$&");
+  return new RegExp("^" + escaped.replace(/\*/g, ".*") + "$", "i");
+}
 
 program
   .option(
@@ -149,17 +207,10 @@ try {
     /**
      * symbols validation
      */
-    if (
-      !params.symbols ||
-      !Array.isArray(params.symbols) ||
-      !params.symbols.length
-    ) {
-      throw new IncorrectParamError(
-        "at least one symbol must be provided (e.g., 'btcusdt')"
-      );
-    }
-    for (let i = 0; i < params.symbols.length; i++) {
-      params.symbols[i] = params.symbols[i].toUpperCase();
+    if (params.symbols && Array.isArray(params.symbols)) {
+      for (let i = 0; i < params.symbols.length; i++) {
+        params.symbols[i] = params.symbols[i].toUpperCase();
+      }
     }
 
     /**
@@ -198,6 +249,7 @@ try {
    * output path validation
    */
   const outputPath = resolve(params.outputPath ?? ".");
+  const missingCsvPath = join(outputPath, MISSING_FILES_CSV);
   try {
     await fs.access(outputPath, constants.W_OK);
     if (!(await fs.lstat(outputPath)).isDirectory()) {
@@ -228,11 +280,89 @@ try {
   }
 
   /**
+   * resolve symbols (explicit, wildcard, or from API)
+   */
+  let symbols = params.symbols;
+  const shouldFetchSymbols =
+    !symbols ||
+    !Array.isArray(symbols) ||
+    symbols.length === 0 ||
+    symbols.some((symbol) => hasWildcard(symbol));
+  if (shouldFetchSymbols) {
+    const allSymbols = await fetchSymbols(params.product);
+    if (!symbols || symbols.length === 0) {
+      symbols = allSymbols;
+    } else {
+      const resolved = new Set();
+      for (const symbol of symbols) {
+        if (hasWildcard(symbol)) {
+          const regex = buildWildcardRegex(symbol);
+          for (const candidate of allSymbols) {
+            if (regex.test(candidate)) {
+              resolved.add(candidate);
+            }
+          }
+        } else {
+          resolved.add(symbol.toUpperCase());
+        }
+      }
+      symbols = Array.from(resolved);
+    }
+  }
+
+  if (!symbols || symbols.length === 0) {
+    throw new IncorrectParamError("no symbols resolved for the request");
+  }
+
+  /**
+   * load missing files list
+   */
+  const missingFiles = new Set();
+  let missingCsvExists = false;
+  let missingWriteQueue = Promise.resolve();
+  try {
+    const csv = await fs.readFile(missingCsvPath, "utf8");
+    missingCsvExists = true;
+    const lines = csv.split("\n").map((line) => line.trim());
+    for (const line of lines) {
+      if (!line || line.startsWith("url_path,")) {
+        continue;
+      }
+      const [urlPath] = line.split(",");
+      if (urlPath) {
+        missingFiles.add(urlPath);
+      }
+    }
+  } catch (e) {
+    if (!(e.code && e.code === "ENOENT")) {
+      throw e;
+    }
+  }
+
+  function queueMissingFile(urlPath, reason) {
+    if (missingFiles.has(urlPath)) {
+      return;
+    }
+    missingFiles.add(urlPath);
+    missingWriteQueue = missingWriteQueue.then(async () => {
+      if (!missingCsvExists) {
+        await fs.appendFile(missingCsvPath, "url_path,reason,created_at\n");
+        missingCsvExists = true;
+      }
+      const timestamp = new Date().toISOString();
+      await fs.appendFile(
+        missingCsvPath,
+        `${urlPath},${reason},${timestamp}\n`
+      );
+    });
+  }
+
+  /**
    * compose links for fetching data
    */
   const dates = generateDates(byDay, startDate, endDate);
   const urls = [];
-  for (const symbol of params.symbols) {
+  for (const symbol of symbols) {
     for (const interval of params.intervals ?? [null]) {
       for (const date of dates) {
         let url = BINANCE_DATA_BASE_URL + "/data";
@@ -307,7 +437,8 @@ try {
   function waitToFinish() {
     if (!waitingToFinish) {
       waitingToFinish = true;
-      Promise.all(promises).then(() => {
+      Promise.all(promises).then(async () => {
+        await missingWriteQueue;
         if (progressCount.success === requestCount){
           console.log("DONE");
         } else if (progressCount.success + progressCount.skipped === requestCount){
@@ -337,11 +468,16 @@ try {
    */
   async function requestData(url) {
     const fileName = url.match(/[^/]*\.zip$/)[0];
-    const urlPath = url.replace(BINANCE_DATA_BASE_URL + '/', '');
+    const urlPath = url.replace(BINANCE_DATA_BASE_URL + "/", "");
     const fileVerified = join(outputPath, urlPath);
     const fileDir = dirname(fileVerified);
     const fileUnverified = fileVerified.replace(/\.zip$/, "_UNVERIFIED.zip");
     const fileDone = fileVerified + ".done";
+
+    if (missingFiles.has(urlPath)) {
+      printResult(logSymbols.info, fileName, "marked missing");
+      return;
+    }
 
     // Check if file already exists (zip or .done)
     try {
@@ -403,8 +539,15 @@ try {
       try {
         https
           .get(url, (res) => {
+            if (res.statusCode === 404) {
+              res.destroy();
+              queueMissingFile(urlPath, "404");
+              printResult(logSymbols.warning, fileName, "no data (404)");
+              return resolve();
+            }
             if (res.headers["content-type"].includes("xml")) {
               res.destroy();
+              queueMissingFile(urlPath, "not_found");
               printResult(logSymbols.warning, fileName, "no data");
               return resolve();
             }
@@ -490,7 +633,7 @@ try {
       "' " +
       (byDay ? "daily" : "monthly") +
       " data for " +
-      params.symbols.length +
+      symbols.length +
       " symbol(s)" +
       (params.intervals
         ? " and " + params.intervals.length + " interval(s)"
