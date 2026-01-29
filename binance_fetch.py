@@ -15,11 +15,11 @@ import logging
 import os
 import re
 import sys
+import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable, List, Optional
 from urllib import request, error
-from urllib.parse import quote
 
 
 BINANCE_DATA_BASE_URL = "https://data.binance.vision"
@@ -93,7 +93,40 @@ class IncorrectParamError(ValueError):
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for the downloader."""
-    parser = argparse.ArgumentParser(description="Binance historical data fetcher")
+    epilog = textwrap.dedent(
+        """\
+        Parameter reference:
+          --product (-p):
+            spot | usd-m | coin-m | option
+
+          --data-type (-t) for spot:
+            klines | aggTrades | trades
+
+          --data-type (-t) for usd-m/coin-m monthly:
+            aggTrades | bookTicker | fundingRate | indexPriceKlines | klines
+            markPriceKlines | premiumIndexKlines | trades
+
+          --data-type (-t) for usd-m/coin-m daily:
+            aggTrades | bookDepth | bookTicker | indexPriceKlines | klines
+            liquidationSnapshot | markPriceKlines | metrics | premiumIndexKlines | trades
+
+          --data-type (-t) for option:
+            BVOLIndex | EOHSummary
+
+          --intervals (-i):
+            1s 1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1mo
+
+        Date format:
+          daily data   -> YYYY-MM-DD
+          monthly data -> YYYY-MM
+          range        -> pass two dates, e.g. 2021-01 2023-12
+        """
+    )
+    parser = argparse.ArgumentParser(
+        description="Binance historical data fetcher",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=epilog,
+    )
     parser.add_argument(
         "-d",
         "--date",
@@ -115,7 +148,7 @@ def parse_args() -> argparse.Namespace:
         "-t",
         "--data-type",
         required=True,
-        help="Data type (e.g., klines, aggTrades, trades, fundingRate).",
+        help="Data type (see parameter reference in help footer).",
     )
     parser.add_argument(
         "-s",
@@ -123,7 +156,7 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         help=(
             "Symbols (e.g., BTCUSDT). Omit to fetch all symbols via Binance API. "
-            "Wildcards like '*USDT' are supported."
+            "Wildcards like '*USDT' are supported. Multiple symbols can be separated by space."
         ),
     )
     parser.add_argument(
@@ -136,14 +169,17 @@ def parse_args() -> argparse.Namespace:
         "-o",
         "--output-path",
         default="data.binance.vision",
-        help="Root path for downloads. Defaults to data.binance.vision.",
+        help=(
+            "Root path for downloads. Defaults to data.binance.vision. "
+            "The Binance URL path is mirrored under this directory."
+        ),
     )
     parser.add_argument(
         "-P",
         "--parallel",
         type=int,
         default=5,
-        help="Number of concurrent downloads (default: 5).",
+        help="Number of concurrent downloads (default: 5). Use -P 1 for sequential.",
     )
     parser.add_argument(
         "--no-validate-params",
@@ -365,7 +401,6 @@ def build_urls(
     """Construct download URLs for all symbol/date/interval combinations."""
     urls = []
     for symbol in symbols:
-        encoded_symbol = quote(symbol, safe="")
         for interval in intervals or [None]:
             for date in dates:
                 parts = [BINANCE_DATA_BASE_URL, "data"]
@@ -377,12 +412,12 @@ def build_urls(
                     parts.append(product)
                 parts.append("daily" if by_day else "monthly")
                 parts.append(data_type)
-                parts.append(encoded_symbol)
+                parts.append(symbol)
                 if interval:
                     parts.append(interval)
-                    filename = quote(f"{symbol}-{interval}-{date}.zip", safe="")
+                    filename = f"{symbol}-{interval}-{date}.zip"
                 else:
-                    filename = quote(f"{symbol}-{data_type}-{date}.zip", safe="")
+                    filename = f"{symbol}-{data_type}-{date}.zip"
                 parts.append(filename)
                 url = "/".join(parts)
                 urls.append(url)
