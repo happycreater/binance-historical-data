@@ -427,7 +427,7 @@ def build_urls(
 def fetch_checksum(url: str) -> str:
     """Fetch and validate the checksum for a given data URL."""
     checksum_url = f"{url}.CHECKSUM"
-    with request.urlopen(checksum_url) as response:
+    with request.urlopen(checksum_url.encode("utf-8")) as response:
         data = response.read().decode("utf-8")
     checksum = data[:64]
     if not re.match(r"^[0-9a-f]{64}$", checksum):
@@ -461,7 +461,7 @@ def download_file(
 
     try:
         # Stream the download and compute SHA256 on the fly.
-        response = request.urlopen(url)
+        response = request.urlopen(url.encode("utf-8"))
         content_type = response.headers.get("Content-Type", "")
         if "xml" in content_type:
             # Binance returns XML for missing data; mark it as not found.
