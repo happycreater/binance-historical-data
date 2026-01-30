@@ -18,7 +18,7 @@ import textwrap
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Iterable, List, Optional, Set, TextIO
 from urllib import request, error, parse
 
 
@@ -90,6 +90,46 @@ DAY_REGEX = re.compile(r"^20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$")
 class IncorrectParamError(ValueError):
     pass
 
+
+class ProgressBar:
+    """Simple terminal progress bar with current URL display."""
+
+    def __init__(
+        self,
+        label: str,
+        total: int,
+        width: int = 32,
+        stream: Optional[TextIO] = None,
+    ) -> None:
+        self.label = label
+        self.total = max(total, 0)
+        self.width = width
+        self.stream = stream or sys.stderr
+        self.current = 0
+        self.finished = False
+
+    def update(self, current: int, current_url: Optional[str] = None) -> None:
+        """Render progress bar with the current URL at the end."""
+        self.current = min(max(current, 0), self.total) if self.total else current
+        total = self.total if self.total else max(current, 1)
+        filled = int(self.width * (self.current / total))
+        bar = "#" * filled + "-" * (self.width - filled)
+        url_text = current_url or ""
+        if len(url_text) > 120:
+            url_text = url_text[:117] + "..."
+        line = f"{self.label} [{bar}] {self.current}/{total}"
+        if url_text:
+            line = f"{line} {url_text}"
+        self.stream.write("\r" + line)
+        self.stream.flush()
+
+    def finish(self) -> None:
+        """Finalize the progress bar line with a newline."""
+        if self.finished:
+            return
+        self.finished = True
+        self.stream.write("\n")
+        self.stream.flush()
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for the downloader."""
@@ -645,6 +685,7 @@ def main() -> int:
     results = {"downloaded": 0, "skipped": 0, "no_data": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
         future_map = {}
+        listing_progress = ProgressBar("Listing", len(symbols))
         if args.remote_index:
             with ThreadPoolExecutor(max_workers=1) as index_executor:
                 index_future = index_executor.submit(
@@ -684,26 +725,42 @@ def main() -> int:
                         by_day,
                         available_keys,
                     )
+                    listing_progress.update(
+                        idx + 1,
+                        symbol_urls[0] if symbol_urls else f"{symbol} (no urls)",
+                    )
                     total_files += len(symbol_urls)
                     for url in symbol_urls:
                         future_map[executor.submit(download_file, url, output_path, logger)] = url
         else:
-            urls = build_urls(
-                args.product,
-                args.data_type,
-                symbols,
-                args.intervals,
-                dates,
-                by_day,
-            )
+            urls = []
+            for idx, symbol in enumerate(symbols):
+                symbol_urls = build_urls(
+                    args.product,
+                    args.data_type,
+                    [symbol],
+                    args.intervals,
+                    dates,
+                    by_day,
+                )
+                urls.extend(symbol_urls)
+                listing_progress.update(
+                    idx + 1,
+                    symbol_urls[0] if symbol_urls else f"{symbol} (no urls)",
+                )
             total_files = len(urls)
             future_map = {
                 executor.submit(download_file, url, output_path, logger): url
                 for url in urls
             }
+        listing_progress.finish()
         logger.info("Total number of files to load: %s", total_files)
+        download_progress = ProgressBar("Downloading", total_files)
+        completed_files = 0
         for future in as_completed(future_map):
             message = future.result()
+            completed_files += 1
+            download_progress.update(completed_files, future_map[future])
             if message.startswith("downloaded"):
                 results["downloaded"] += 1
             elif message.startswith("skipped"):
@@ -713,6 +770,7 @@ def main() -> int:
             else:
                 results["failed"] += 1
             logger.info(message)
+        download_progress.finish()
 
     logger.info(
         "Downloaded: %s/%s; not found: %s/%s; skipped: %s/%s; failed: %s/%s",
