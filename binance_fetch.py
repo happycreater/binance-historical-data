@@ -4,11 +4,10 @@
 This script mirrors the CLI behavior of the Node-based tool and provides:
 - Symbol discovery (optional wildcard support) via Binance API.
 - Downloading daily/monthly datasets with checksum verification.
-- Persistent tracking of missing files in a CSV.
+- Remote index discovery with local caching to reduce 404s.
 - Logging to both stdout and a file in the output directory.
 """
 import argparse
-import csv
 import datetime as dt
 import hashlib
 import logging
@@ -16,15 +15,16 @@ import os
 import re
 import sys
 import textwrap
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Set
 from urllib import request, error, parse
 
 
 BINANCE_DATA_BASE_URL = "https://data.binance.vision"
-MISSING_FILES_CSV = "missing.csv"
 LOG_FILE_NAME = "binance-fetch.log"
+INDEX_CACHE_DIR = ".binance-index-cache"
 
 PRODUCTS = ["spot", "usd-m", "coin-m", "option"]
 SPOT_DATA_TYPES = ["klines", "aggTrades", "trades"]
@@ -192,7 +192,14 @@ def parse_args() -> argparse.Namespace:
         dest="api_proxy",
         help="Proxy URL for Binance API requests (symbol discovery), e.g. http://localhost:7890.",
     )
+    parser.add_argument(
+        "--no-remote-index",
+        dest="remote_index",
+        action="store_false",
+        help="Disable remote index listing from data.binance.vision (falls back to URL probing).",
+    )
     parser.set_defaults(validate_params=True)
+    parser.set_defaults(remote_index=True)
     return parser.parse_args()
 
 
@@ -364,32 +371,6 @@ def resolve_symbols(symbols: Optional[List[str]], product: str, proxy_url: Optio
     return sorted(resolved)
 
 
-def load_missing(output_path: Path) -> set[str]:
-    """Load known-missing URL paths from the missing.csv file."""
-    missing_path = output_path / MISSING_FILES_CSV
-    if not missing_path.exists():
-        return set()
-    missing = set()
-    with missing_path.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        for row in reader:
-            if not row or row[0] == "url_path":
-                continue
-            missing.add(row[0])
-    return missing
-
-
-def append_missing(output_path: Path, url_path: str, reason: str) -> None:
-    """Append a missing URL path with reason and timestamp to missing.csv."""
-    missing_path = output_path / MISSING_FILES_CSV
-    new_file = not missing_path.exists()
-    with missing_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        if new_file:
-            writer.writerow(["url_path", "reason", "created_at"])
-        writer.writerow([url_path, reason, dt.datetime.now(dt.UTC).isoformat()])
-
-
 def build_urls(
     product: str,
     data_type: str,
@@ -397,6 +378,7 @@ def build_urls(
     intervals: Optional[List[str]],
     dates: Iterable[str],
     by_day: bool,
+    available_keys: Optional[Set[str]] = None,
 ) -> List[str]:
     """Construct download URLs for all symbol/date/interval combinations."""
     urls = []
@@ -418,8 +400,10 @@ def build_urls(
                     filename = f"{symbol}-{interval}-{date}.zip"
                 else:
                     filename = f"{symbol}-{data_type}-{date}.zip"
-                parts.append(filename)
-                url = "/".join(parts)
+                url_path = "/".join(parts[1:] + [filename])
+                if available_keys is not None and url_path not in available_keys:
+                    continue
+                url = "/".join(parts + [filename])
                 urls.append(url)
     return urls
 
@@ -444,18 +428,115 @@ def fetch_checksum(url: str) -> str:
     return checksum
 
 
-def download_file(
-    url: str,
+def build_prefix(product: str, data_type: str, symbol: str, interval: Optional[str], by_day: bool) -> str:
+    """Build a data.binance.vision prefix for directory listing."""
+    parts = ["data"]
+    if product == "usd-m":
+        parts += ["futures", "um"]
+    elif product == "coin-m":
+        parts += ["futures", "cm"]
+    else:
+        parts.append(product)
+    parts.append("daily" if by_day else "monthly")
+    parts.append(data_type)
+    parts.append(symbol)
+    if interval:
+        parts.append(interval)
+    return "/".join(parts) + "/"
+
+
+def cache_path_for_prefix(output_root: Path, prefix: str) -> Path:
+    """Resolve cache file path for a given prefix."""
+    digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()[:16]
+    cache_dir = output_root / INDEX_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"index_{digest}.json"
+
+
+def load_cached_index(output_root: Path, prefix: str) -> Optional[Set[str]]:
+    """Load cached index keys for a prefix, if available."""
+    cache_path = cache_path_for_prefix(output_root, prefix)
+    if not cache_path.exists():
+        return None
+    try:
+        data = json_load(cache_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    keys = data.get("keys")
+    if not isinstance(keys, list):
+        return None
+    return {key for key in keys if isinstance(key, str)}
+
+
+def store_cached_index(output_root: Path, prefix: str, keys: Set[str]) -> None:
+    """Persist index keys for a prefix."""
+    cache_path = cache_path_for_prefix(output_root, prefix)
+    payload = {
+        "prefix": prefix,
+        "cached_at": dt.datetime.now(dt.UTC).isoformat(),
+        "keys": sorted(keys),
+    }
+    cache_path.write_text(json_dump(payload), encoding="utf-8")
+
+
+def json_dump(payload: dict) -> str:
+    """Serialize a dictionary as JSON."""
+    import json
+
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def fetch_remote_index(prefix: str) -> Set[str]:
+    """Fetch available keys from data.binance.vision prefix listing."""
+    listing_url = f"{BINANCE_DATA_BASE_URL}/?prefix={parse.quote(prefix)}"
+    with request.urlopen(listing_url) as response:
+        html_content = response.read().decode("utf-8")
+    match = re.search(r"var BUCKET_URL = '(.*?)';", html_content)
+    if not match:
+        raise IncorrectParamError("BUCKET_URL not found in index page.")
+    bucket_url = f"{match.group(1)}?delimiter=/&prefix={parse.quote(prefix)}"
+    with request.urlopen(bucket_url) as response:
+        xml_content = response.read().decode("utf-8")
+    root = ET.fromstring(xml_content)
+    namespace = {"s3": root.tag.split("}")[0].strip("{")}
+    keys = {
+        element.text
+        for element in root.findall(".//s3:Key", namespace)
+        if element.text and element.text.endswith(".zip")
+    }
+    return keys
+
+
+def build_available_keys(
     output_root: Path,
-    missing_files: set[str],
+    product: str,
+    data_type: str,
+    symbols: Iterable[str],
+    intervals: Optional[List[str]],
+    by_day: bool,
     logger: logging.Logger,
-) -> str:
+) -> Optional[Set[str]]:
+    """Build a set of available zip keys using the remote index."""
+    available: set[str] = set()
+    for symbol in symbols:
+        for interval in intervals or [None]:
+            prefix = build_prefix(product, data_type, symbol, interval, by_day)
+            cached = load_cached_index(output_root, prefix)
+            if cached is None:
+                try:
+                    cached = fetch_remote_index(prefix)
+                    store_cached_index(output_root, prefix, cached)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to load remote index for %s: %s", prefix, exc)
+                    return None
+            available.update(cached)
+    return available
+
+
+def download_file(url: str, output_root: Path, logger: logging.Logger) -> str:
     """Download a single file and verify checksum, returning a status message."""
     filename = url.split("/")[-1]
     url_path = url.replace(BINANCE_DATA_BASE_URL + "/", "")
-    if url_path in missing_files:
-        return f"skipped (marked missing): {filename}"
-
     # Build local file paths for verified/unverified artifacts.
     verified_path = output_root / url_path
     unverified_path = verified_path.with_name(verified_path.stem + "_UNVERIFIED.zip")
@@ -474,8 +555,6 @@ def download_file(
         content_type = response.headers.get("Content-Type", "")
         if "xml" in content_type:
             # Binance returns XML for missing data; mark it as not found.
-            missing_files.add(url_path)
-            append_missing(output_root, url_path, "not_found")
             return f"no data: {filename}"
         sha256 = hashlib.sha256()
         with unverified_path.open("wb") as handle:
@@ -491,14 +570,9 @@ def download_file(
             unverified_path.replace(verified_path)
             return f"downloaded: {filename}"
         # Mark checksum mismatch as missing to avoid repeated failures.
-        missing_files.add(url_path)
-        append_missing(output_root, url_path, "checksum_mismatch")
         return f"checksum mismatch: {filename}"
     except error.HTTPError as exc:
-        # Record 404s as missing and skip on future runs.
         if exc.code == 404:
-            missing_files.add(url_path)
-            append_missing(output_root, url_path, "404")
             return f"no data (404): {filename}"
         logger.error("HTTP error for %s: %s", filename, exc)
         return f"failed: {filename}"
@@ -521,6 +595,21 @@ def main() -> int:
         raise IncorrectParamError("no symbols resolved for the request")
 
     dates = generate_dates(by_day, start_date, end_date)
+
+    available_keys = None
+    if args.remote_index:
+        available_keys = build_available_keys(
+            output_path,
+            args.product,
+            args.data_type,
+            symbols,
+            args.intervals,
+            by_day,
+            logger,
+        )
+        if available_keys is None:
+            logger.info("Remote index unavailable; falling back to URL probing.")
+
     urls = build_urls(
         args.product,
         args.data_type,
@@ -528,9 +617,8 @@ def main() -> int:
         args.intervals,
         dates,
         by_day,
+        available_keys,
     )
-
-    missing_files = load_missing(output_path)
     logger.info("Saving to '%s'", output_path)
     logger.info(
         "Downloading '%s' %s data for %s symbols",
@@ -544,7 +632,7 @@ def main() -> int:
     results = {"downloaded": 0, "skipped": 0, "no_data": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
         future_map = {
-            executor.submit(download_file, url, output_path, missing_files, logger): url
+            executor.submit(download_file, url, output_path, logger): url
             for url in urls
         }
         for future in as_completed(future_map):

@@ -129,7 +129,7 @@ You may pass `-o` or `--output` followed by a relative or absolute path to chang
 
 Data is loaded with a stream. Until the file is fully downloaded and verified, it will look like this: `<symbol>...UNVERIFIED.zip`.
 
-If the download returns a 404 or no data is found, the URL path is stored in a `missing.csv` file at the root of the output directory. Subsequent runs will skip any entries already listed in this file.
+To reduce 404s, the downloader attempts to fetch the available ZIP listings for the requested symbol paths from `data.binance.vision` and caches them under `.binance-index-cache` in the output directory. Use `--no-remote-index` to disable this behavior and fall back to URL probing.
 
 ### Concurrency
 
