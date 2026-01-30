@@ -5,3 +5,4 @@ data/
 !/__tests__/binance-fetch-result/.gitignore
 .ipynb_checkpoints
 *.log
+nohup.out
