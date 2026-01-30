@@ -408,15 +408,6 @@ def build_urls(
     return urls
 
 
-def encode_url(url: str) -> str:
-    """Percent-encode non-ASCII characters for safe HTTP requests."""
-    parsed = parse.urlsplit(url)
-    path = parse.quote(parsed.path, safe="/")
-    query = parse.quote(parsed.query, safe="=&") if parsed.query else ""
-    fragment = parse.quote(parsed.fragment) if parsed.fragment else ""
-    return parse.urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
-
-
 def fetch_checksum(url: str) -> str:
     """Fetch and validate the checksum for a given data URL."""
     checksum_url = encode_url(f"{url}.CHECKSUM")
