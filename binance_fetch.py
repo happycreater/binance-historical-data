@@ -18,8 +18,13 @@ import textwrap
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable, List, Optional, Set, TextIO
+from typing import Iterable, List, Optional, Set
 from urllib import request, error, parse
+
+try:
+    from tqdm import tqdm
+except ImportError as exc:  # pragma: no cover
+    raise SystemExit("Missing dependency 'tqdm'. Install with: pip install tqdm") from exc
 
 
 BINANCE_DATA_BASE_URL = "https://data.binance.vision"
@@ -90,46 +95,6 @@ DAY_REGEX = re.compile(r"^20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$")
 class IncorrectParamError(ValueError):
     pass
 
-
-class ProgressBar:
-    """Simple terminal progress bar with current URL display."""
-
-    def __init__(
-        self,
-        label: str,
-        total: int,
-        width: int = 32,
-        stream: Optional[TextIO] = None,
-    ) -> None:
-        self.label = label
-        self.total = max(total, 0)
-        self.width = width
-        self.stream = stream or sys.stderr
-        self.current = 0
-        self.finished = False
-
-    def update(self, current: int, current_url: Optional[str] = None) -> None:
-        """Render progress bar with the current URL at the end."""
-        self.current = min(max(current, 0), self.total) if self.total else current
-        total = self.total if self.total else max(current, 1)
-        filled = int(self.width * (self.current / total))
-        bar = "#" * filled + "-" * (self.width - filled)
-        url_text = current_url or ""
-        if len(url_text) > 120:
-            url_text = url_text[:117] + "..."
-        line = f"{self.label} [{bar}] {self.current}/{total}"
-        if url_text:
-            line = f"{line} {url_text}"
-        self.stream.write("\r" + line)
-        self.stream.flush()
-
-    def finish(self) -> None:
-        """Finalize the progress bar line with a newline."""
-        if self.finished:
-            return
-        self.finished = True
-        self.stream.write("\n")
-        self.stream.flush()
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line options for the downloader."""
@@ -253,12 +218,7 @@ def setup_logging(output_path: Path) -> logging.Logger:
 
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
-    stdout_stream = open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)
-    stream_handler = logging.StreamHandler(stdout_stream)
-    stream_handler.setFormatter(formatter)
-
     logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
     return logger
 
 
@@ -526,12 +486,17 @@ def json_dump(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def fetch_remote_index(prefix: str, logger: Optional[logging.Logger] = None) -> Set[str]:
+def fetch_remote_index(
+    prefix: str,
+    proxy_url: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Set[str]:
     """Fetch available keys from data.binance.vision prefix listing."""
     listing_url = f"{BINANCE_DATA_BASE_URL}/?prefix={parse.quote(prefix)}"
     if logger:
         logger.info("Requesting index landing page: %s", listing_url)
-    with request.urlopen(listing_url) as response:
+    opener = build_proxy_opener(proxy_url) if proxy_url else request.build_opener()
+    with opener.open(listing_url) as response:
         html_content = response.read().decode("utf-8")
     match = re.search(r"var BUCKET_URL = '(.*?)';", html_content)
     if not match:
@@ -539,7 +504,7 @@ def fetch_remote_index(prefix: str, logger: Optional[logging.Logger] = None) -> 
     bucket_url = f"{match.group(1)}?delimiter=/&prefix={parse.quote(prefix)}"
     if logger:
         logger.info("Requesting index listing: %s", bucket_url)
-    with request.urlopen(bucket_url) as response:
+    with opener.open(bucket_url) as response:
         xml_content = response.read().decode("utf-8")
     root = ET.fromstring(xml_content)
     namespace = {"s3": root.tag.split("}")[0].strip("{")}
@@ -561,6 +526,7 @@ def build_available_keys(
     intervals: Optional[List[str]],
     by_day: bool,
     logger: logging.Logger,
+    proxy_url: Optional[str] = None,
 ) -> Optional[Set[str]]:
     """Build a set of available zip keys using the remote index."""
     available: set[str] = set()
@@ -570,7 +536,7 @@ def build_available_keys(
             cached = load_cached_index(output_root, prefix)
             if cached is None:
                 try:
-                    cached = fetch_remote_index(prefix)
+                    cached = fetch_remote_index(prefix, proxy_url, logger)
                     store_cached_index(output_root, prefix, cached)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Failed to load remote index for %s: %s", prefix, exc)
@@ -587,6 +553,7 @@ def build_available_keys_for_symbol(
     intervals: Optional[List[str]],
     by_day: bool,
     logger: logging.Logger,
+    proxy_url: Optional[str] = None,
 ) -> Optional[Set[str]]:
     """Build a set of available zip keys for a single symbol using the remote index."""
     available: set[str] = set()
@@ -598,7 +565,7 @@ def build_available_keys_for_symbol(
         else:
             logger.info("Index cache miss for %s; fetching remote index.", prefix)
             try:
-                cached = fetch_remote_index(prefix, logger)
+                cached = fetch_remote_index(prefix, proxy_url, logger)
                 store_cached_index(output_root, prefix, cached)
                 logger.info("Stored index cache for %s (%s keys).", prefix, len(cached))
             except Exception as exc:  # noqa: BLE001
@@ -685,32 +652,43 @@ def main() -> int:
     results = {"downloaded": 0, "skipped": 0, "no_data": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
         future_map = {}
-        listing_progress = ProgressBar("Listing", len(symbols))
+        listing_progress = tqdm(
+            total=len(symbols),
+            desc="Listing",
+            unit="sym",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            mininterval=0,
+            maxinterval=0,
+            miniters=1,
+        )
         if args.remote_index:
-            with ThreadPoolExecutor(max_workers=1) as index_executor:
-                index_future = index_executor.submit(
-                    build_available_keys_for_symbol,
-                    output_path,
-                    args.product,
-                    args.data_type,
-                    symbols[0],
-                    args.intervals,
-                    by_day,
-                    logger,
-                )
-                for idx, symbol in enumerate(symbols):
-                    available_keys = index_future.result()
-                    if idx + 1 < len(symbols):
-                        index_future = index_executor.submit(
-                            build_available_keys_for_symbol,
-                            output_path,
-                            args.product,
-                            args.data_type,
-                            symbols[idx + 1],
-                            args.intervals,
-                            by_day,
-                            logger,
+            index_workers = min(max(args.parallel, 1), len(symbols))
+            with ThreadPoolExecutor(max_workers=index_workers) as index_executor:
+                index_futures = {
+                    index_executor.submit(
+                        build_available_keys_for_symbol,
+                        output_path,
+                        args.product,
+                        args.data_type,
+                        symbol,
+                        args.intervals,
+                        by_day,
+                        logger,
+                        args.api_proxy,
+                    ): symbol
+                    for symbol in symbols
+                }
+                completed_symbols = 0
+                for future in as_completed(index_futures):
+                    symbol = index_futures[future]
+                    try:
+                        available_keys = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to load remote index for %s: %s", symbol, exc
                         )
+                        available_keys = None
                     if available_keys is None:
                         logger.info(
                             "Remote index unavailable for %s; falling back to URL probing.",
@@ -725,10 +703,12 @@ def main() -> int:
                         by_day,
                         available_keys,
                     )
-                    listing_progress.update(
-                        idx + 1,
-                        symbol_urls[0] if symbol_urls else f"{symbol} (no urls)",
-                    )
+                    completed_symbols += 1
+                    url_display = symbol_urls[0] if symbol_urls else f"{symbol} (no urls)"
+                    if len(url_display) > 120:
+                        url_display = url_display[:117] + "..."
+                    listing_progress.set_postfix_str(url_display, refresh=False)
+                    listing_progress.update(1)
                     total_files += len(symbol_urls)
                     for url in symbol_urls:
                         future_map[executor.submit(download_file, url, output_path, logger)] = url
@@ -744,23 +724,37 @@ def main() -> int:
                     by_day,
                 )
                 urls.extend(symbol_urls)
-                listing_progress.update(
-                    idx + 1,
-                    symbol_urls[0] if symbol_urls else f"{symbol} (no urls)",
-                )
+                url_display = symbol_urls[0] if symbol_urls else f"{symbol} (no urls)"
+                if len(url_display) > 120:
+                    url_display = url_display[:117] + "..."
+                listing_progress.set_postfix_str(url_display, refresh=False)
+                listing_progress.update(1)
             total_files = len(urls)
             future_map = {
                 executor.submit(download_file, url, output_path, logger): url
                 for url in urls
             }
-        listing_progress.finish()
+        listing_progress.close()
         logger.info("Total number of files to load: %s", total_files)
-        download_progress = ProgressBar("Downloading", total_files)
+        download_progress = tqdm(
+            total=total_files,
+            desc="Downloading",
+            unit="file",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            mininterval=0,
+            maxinterval=0,
+            miniters=1,
+        )
         completed_files = 0
         for future in as_completed(future_map):
             message = future.result()
             completed_files += 1
-            download_progress.update(completed_files, future_map[future])
+            url_display = future_map[future]
+            if len(url_display) > 120:
+                url_display = url_display[:117] + "..."
+            download_progress.set_postfix_str(url_display, refresh=False)
+            download_progress.update(1)
             if message.startswith("downloaded"):
                 results["downloaded"] += 1
             elif message.startswith("skipped"):
@@ -770,7 +764,7 @@ def main() -> int:
             else:
                 results["failed"] += 1
             logger.info(message)
-        download_progress.finish()
+        download_progress.close()
 
     logger.info(
         "Downloaded: %s/%s; not found: %s/%s; skipped: %s/%s; failed: %s/%s",

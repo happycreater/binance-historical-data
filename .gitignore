@@ -6,3 +6,4 @@ data/
 .ipynb_checkpoints
 *.log
 nohup.out
+data.binance.vision/.binance-index-cache
