@@ -486,15 +486,19 @@ def json_dump(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def fetch_remote_index(prefix: str) -> Set[str]:
+def fetch_remote_index(prefix: str, logger: Optional[logging.Logger] = None) -> Set[str]:
     """Fetch available keys from data.binance.vision prefix listing."""
     listing_url = f"{BINANCE_DATA_BASE_URL}/?prefix={parse.quote(prefix)}"
+    if logger:
+        logger.info("Requesting index landing page: %s", listing_url)
     with request.urlopen(listing_url) as response:
         html_content = response.read().decode("utf-8")
     match = re.search(r"var BUCKET_URL = '(.*?)';", html_content)
     if not match:
         raise IncorrectParamError("BUCKET_URL not found in index page.")
     bucket_url = f"{match.group(1)}?delimiter=/&prefix={parse.quote(prefix)}"
+    if logger:
+        logger.info("Requesting index listing: %s", bucket_url)
     with request.urlopen(bucket_url) as response:
         xml_content = response.read().decode("utf-8")
     root = ET.fromstring(xml_content)
@@ -504,6 +508,8 @@ def fetch_remote_index(prefix: str) -> Set[str]:
         for element in root.findall(".//s3:Key", namespace)
         if element.text and element.text.endswith(".zip")
     }
+    if logger:
+        logger.info("Index listing returned %s zip files for prefix %s", len(keys), prefix)
     return keys
 
 
@@ -530,6 +536,35 @@ def build_available_keys(
                     logger.warning("Failed to load remote index for %s: %s", prefix, exc)
                     return None
             available.update(cached)
+    return available
+
+
+def build_available_keys_for_symbol(
+    output_root: Path,
+    product: str,
+    data_type: str,
+    symbol: str,
+    intervals: Optional[List[str]],
+    by_day: bool,
+    logger: logging.Logger,
+) -> Optional[Set[str]]:
+    """Build a set of available zip keys for a single symbol using the remote index."""
+    available: set[str] = set()
+    for interval in intervals or [None]:
+        prefix = build_prefix(product, data_type, symbol, interval, by_day)
+        cached = load_cached_index(output_root, prefix)
+        if cached is not None:
+            logger.info("Index cache hit for %s (%s keys).", prefix, len(cached))
+        else:
+            logger.info("Index cache miss for %s; fetching remote index.", prefix)
+            try:
+                cached = fetch_remote_index(prefix, logger)
+                store_cached_index(output_root, prefix, cached)
+                logger.info("Stored index cache for %s (%s keys).", prefix, len(cached))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load remote index for %s: %s", prefix, exc)
+                return None
+        available.update(cached)
     return available
 
 
@@ -596,29 +631,7 @@ def main() -> int:
 
     dates = generate_dates(by_day, start_date, end_date)
 
-    available_keys = None
-    if args.remote_index:
-        available_keys = build_available_keys(
-            output_path,
-            args.product,
-            args.data_type,
-            symbols,
-            args.intervals,
-            by_day,
-            logger,
-        )
-        if available_keys is None:
-            logger.info("Remote index unavailable; falling back to URL probing.")
-
-    urls = build_urls(
-        args.product,
-        args.data_type,
-        symbols,
-        args.intervals,
-        dates,
-        by_day,
-        available_keys,
-    )
+    urls: List[str] = []
     logger.info("Saving to '%s'", output_path)
     logger.info(
         "Downloading '%s' %s data for %s symbols",
@@ -626,15 +639,69 @@ def main() -> int:
         "daily" if by_day else "monthly",
         len(symbols),
     )
-    logger.info("Total number of files to load: %s", len(urls))
+    total_files = 0
 
     # Track result counts for the final summary.
     results = {"downloaded": 0, "skipped": 0, "no_data": 0, "failed": 0}
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-        future_map = {
-            executor.submit(download_file, url, output_path, logger): url
-            for url in urls
-        }
+        future_map = {}
+        if args.remote_index:
+            with ThreadPoolExecutor(max_workers=1) as index_executor:
+                index_future = index_executor.submit(
+                    build_available_keys_for_symbol,
+                    output_path,
+                    args.product,
+                    args.data_type,
+                    symbols[0],
+                    args.intervals,
+                    by_day,
+                    logger,
+                )
+                for idx, symbol in enumerate(symbols):
+                    available_keys = index_future.result()
+                    if idx + 1 < len(symbols):
+                        index_future = index_executor.submit(
+                            build_available_keys_for_symbol,
+                            output_path,
+                            args.product,
+                            args.data_type,
+                            symbols[idx + 1],
+                            args.intervals,
+                            by_day,
+                            logger,
+                        )
+                    if available_keys is None:
+                        logger.info(
+                            "Remote index unavailable for %s; falling back to URL probing.",
+                            symbol,
+                        )
+                    symbol_urls = build_urls(
+                        args.product,
+                        args.data_type,
+                        [symbol],
+                        args.intervals,
+                        dates,
+                        by_day,
+                        available_keys,
+                    )
+                    total_files += len(symbol_urls)
+                    for url in symbol_urls:
+                        future_map[executor.submit(download_file, url, output_path, logger)] = url
+        else:
+            urls = build_urls(
+                args.product,
+                args.data_type,
+                symbols,
+                args.intervals,
+                dates,
+                by_day,
+            )
+            total_files = len(urls)
+            future_map = {
+                executor.submit(download_file, url, output_path, logger): url
+                for url in urls
+            }
+        logger.info("Total number of files to load: %s", total_files)
         for future in as_completed(future_map):
             message = future.result()
             if message.startswith("downloaded"):
@@ -650,13 +717,13 @@ def main() -> int:
     logger.info(
         "Downloaded: %s/%s; not found: %s/%s; skipped: %s/%s; failed: %s/%s",
         results["downloaded"],
-        len(urls),
+        total_files,
         results["no_data"],
-        len(urls),
+        total_files,
         results["skipped"],
-        len(urls),
+        total_files,
         results["failed"],
-        len(urls),
+        total_files,
     )
     if results["failed"] > 0 or (
         results["downloaded"] == 0 and results["skipped"] == 0
