@@ -11,3 +11,4 @@ parquet.binance.vision/
 __pycache__
 backup
 test.ipynb
+target/
