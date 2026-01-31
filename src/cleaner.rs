@@ -17,31 +17,14 @@ pub fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<
     let mut csv_content = String::new();
     zipped.read_to_string(&mut csv_content)?;
 
+    let first_line = csv_content.lines().next().unwrap_or("");
+    let first_cell = first_line.split(',').next().unwrap_or("");
+    let has_header = first_cell.parse::<f64>().is_err();
     let mut reader = CsvReader::new(csv_content.as_bytes());
     let mut df = reader
-        .has_header(false)
+        .has_header(has_header)
         .finish()
         .context("parse csv")?;
-
-    let columns = [
-        "open_time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "close_time",
-        "quote_asset_volume",
-        "number_of_trades",
-        "taker_buy_base_asset_volume",
-        "taker_buy_quote_asset_volume",
-        "ignore",
-    ];
-    if df.width() == columns.len() {
-        for (idx, name) in columns.iter().enumerate() {
-            df.rename(df.get_column_names()[idx], name)?;
-        }
-    }
 
     df.with_column(Series::new("pattern", vec![pattern; df.height()]))?;
     df.with_column(Series::new("symbol", vec![symbol; df.height()]))?;
