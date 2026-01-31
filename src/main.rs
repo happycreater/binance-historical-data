@@ -91,7 +91,12 @@ fn parse_listing(prefix: &str, xml_content: &str) -> Result<(Vec<(String, bool)>
     }
 
     entries.sort_by_key(|entry| (!entry.1, entry.0.clone()));
-    Ok((entries, is_truncated, next_marker.or(last_key)))
+    let continuation = if is_truncated {
+        next_marker.or(last_key)
+    } else {
+        None
+    };
+    Ok((entries, is_truncated, continuation))
 }
 
 fn list_prefix(client: &Client, prefix: &str) -> Result<Vec<(String, bool)>> {
@@ -157,7 +162,7 @@ fn normalize_frame(df: DataFrame) -> Result<DataFrame> {
     let normalized = df
         .lazy()
         .unique(None, UniqueKeepStrategy::First)
-        .sort([col(&first_column)], SortOptions::default())
+        .sort([first_column.clone()], SortMultipleOptions::default())
         .collect()?;
     Ok(normalized)
 }
@@ -169,15 +174,15 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
     let mut csv_content = String::new();
     zipped.read_to_string(&mut csv_content)?;
 
-    let mut reader = CsvReader::new(Cursor::new(csv_content.as_bytes()));
-    let mut df = reader
-        .has_header(has_header(&csv_content))
+    let mut df = CsvReadOptions::default()
+        .with_has_header(has_header(&csv_content))
+        .into_reader_with_file_handle(Cursor::new(csv_content.as_bytes()))
         .finish()
         .context("parse csv")?;
 
     df.with_column(Series::new("pattern", vec![pattern; df.height()]))?;
     df.with_column(Series::new("symbol", vec![symbol; df.height()]))?;
-    let df = normalize_frame(df)?;
+    let mut df = normalize_frame(df)?;
 
     let out_dir = PathBuf::from(CLEAN_ROOT)
         .join(pattern)
@@ -186,7 +191,15 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
     let out_path = out_dir.join("data.parquet");
     if out_path.exists() {
         let existing = LazyFrame::scan_parquet(&out_path, Default::default())?;
-        let combined = concat([existing, df.lazy()], true, true)?.collect()?;
+        let combined = concat(
+            [existing, df.lazy()],
+            UnionArgs {
+                parallel: true,
+                rechunk: true,
+                ..Default::default()
+            },
+        )?
+        .collect()?;
         let mut combined = normalize_frame(combined)?;
         let mut file = fs::File::create(&out_path)?;
         ParquetWriter::new(&mut file).finish(&mut combined)?;
