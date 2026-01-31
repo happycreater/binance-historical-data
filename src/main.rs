@@ -149,6 +149,20 @@ fn has_header(csv_content: &str) -> bool {
     first_cell.parse::<f64>().is_err()
 }
 
+fn normalize_frame(df: DataFrame) -> Result<DataFrame> {
+    let first_column = df
+        .get_column_names()
+        .first()
+        .context("dataframe has no columns")?
+        .to_string();
+    let normalized = df
+        .lazy()
+        .unique(None, UniqueKeepStrategy::First)
+        .sort([col(&first_column)], SortOptions::default())
+        .collect()?;
+    Ok(normalized)
+}
+
 fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> {
     let cursor = Cursor::new(zip_bytes);
     let mut archive = ZipArchive::new(cursor)?;
@@ -164,6 +178,7 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
 
     df.with_column(Series::new("pattern", vec![pattern; df.height()]))?;
     df.with_column(Series::new("symbol", vec![symbol; df.height()]))?;
+    let df = normalize_frame(df)?;
 
     let out_dir = PathBuf::from(CLEAN_ROOT)
         .join(pattern)
@@ -173,6 +188,7 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
     if out_path.exists() {
         let existing = LazyFrame::scan_parquet(&out_path, Default::default())?;
         let combined = concat([existing, df.lazy()], true, true)?.collect()?;
+        let combined = normalize_frame(combined)?;
         let mut file = fs::File::create(&out_path)?;
         ParquetWriter::new(&mut file).finish(&combined)?;
     } else {
