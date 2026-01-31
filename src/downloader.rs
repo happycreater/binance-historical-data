@@ -8,12 +8,6 @@ use urlencoding::encode;
 
 const BASE_URL: &str = "https://data.binance.vision";
 
-#[derive(Clone, Debug)]
-pub struct RemoteEntry {
-    pub name: String,
-    pub is_dir: bool,
-}
-
 pub fn wildcard_match(text: &str, pattern: &str) -> bool {
     let escaped = regex::escape(pattern);
     let regex_pattern = format!(
@@ -35,9 +29,9 @@ fn get_bucket_url(client: &Client, prefix: &str) -> Result<String> {
     Ok(caps.get(1).context("BUCKET_URL missing")?.as_str().to_string())
 }
 
-pub fn list_prefix(client: &Client, prefix: &str) -> Result<Vec<RemoteEntry>> {
+pub fn list_prefix(client: &Client, prefix: &str) -> Result<Vec<(String, bool)>> {
     let bucket_url = get_bucket_url(client, prefix)?;
-    let mut entries = Vec::new();
+    let mut entries: Vec<(String, bool)> = Vec::new();
     let mut continuation: Option<String> = None;
 
     loop {
@@ -74,20 +68,14 @@ pub fn list_prefix(client: &Client, prefix: &str) -> Result<Vec<RemoteEntry>> {
                     if current_tag.ends_with("Prefix") && in_common_prefix {
                         let name = text.trim_start_matches(prefix).trim_matches('/');
                         if !name.is_empty() {
-                            entries.push(RemoteEntry {
-                                name: name.to_string(),
-                                is_dir: true,
-                            });
+                            entries.push((name.to_string(), true));
                         }
                     } else if current_tag.ends_with("Key") {
                         last_key = Some(text.clone());
                         if text.ends_with(".zip") {
                             let name = text.trim_start_matches(prefix);
                             if !name.is_empty() {
-                                entries.push(RemoteEntry {
-                                    name: name.to_string(),
-                                    is_dir: false,
-                                });
+                                entries.push((name.to_string(), false));
                             }
                         }
                     } else if current_tag.ends_with("IsTruncated") {
@@ -111,7 +99,7 @@ pub fn list_prefix(client: &Client, prefix: &str) -> Result<Vec<RemoteEntry>> {
         }
     }
 
-    entries.sort_by_key(|entry| (!entry.is_dir, entry.name.clone()));
+    entries.sort_by_key(|entry| (!entry.1, entry.0.clone()));
     Ok(entries)
 }
 

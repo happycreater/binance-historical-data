@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use downloader::{download_one, encoded_url, list_prefix, wildcard_match};
 use rayon::prelude::*;
 use reqwest::blocking::Client;
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,22 +13,23 @@ fn build_urls(
     client: &Client,
     pattern: &str,
     symbol_glob: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<HashMap<String, Vec<String>>> {
     let endpoint = pattern.split("SYMBOL").next().unwrap_or("");
     let entries = list_prefix(client, endpoint)?;
     let symbols: Vec<String> = entries
         .iter()
-        .filter(|entry| entry.is_dir && wildcard_match(&entry.name, symbol_glob))
-        .map(|entry| entry.name.clone())
+        .filter(|entry| entry.1 && wildcard_match(&entry.0, symbol_glob))
+        .map(|entry| entry.0.clone())
         .collect();
 
-    let mut urls = Vec::new();
+    let mut urls: HashMap<String, Vec<String>> = HashMap::new();
     for symbol in symbols {
         let path = pattern.replace("SYMBOL", &symbol);
         let all_zip = list_prefix(client, &path)?;
         for entry in all_zip {
-            if !entry.is_dir {
-                urls.push((symbol.clone(), encoded_url(&path, &entry.name)));
+            if !entry.1 {
+                let url = encoded_url(&path, &entry.0);
+                urls.entry(symbol.clone()).or_default().push(url);
             }
         }
     }
@@ -48,17 +50,19 @@ fn main() -> Result<()> {
     let downloaded = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
 
-    urls.par_iter().for_each(|(symbol, url)| {
-        match download_one(&client, url, chunk_bytes) {
-            Ok(zip_bytes) => {
-                if cleaner::clean_zip_bytes(&zip_bytes, &pattern, symbol).is_ok() {
-                    downloaded.fetch_add(1, Ordering::Relaxed);
-                } else {
+    urls.par_iter().for_each(|(symbol, symbol_urls)| {
+        for url in symbol_urls {
+            match download_one(&client, url, chunk_bytes) {
+                Ok(zip_bytes) => {
+                    if cleaner::clean_zip_bytes(&zip_bytes, &pattern, symbol).is_ok() {
+                        downloaded.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
                     failed.fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            Err(_) => {
-                failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     });
@@ -75,20 +79,22 @@ fn main() -> Result<()> {
 #[allow(dead_code)]
 fn sequential_download_and_clean(
     client: &Client,
-    urls: &[(String, String)],
+    urls: &HashMap<String, Vec<String>>,
     pattern: &str,
     chunk_bytes: usize,
 ) -> Result<()> {
     let downloaded = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
-    for (symbol, url) in urls {
-        match download_one(client, url, chunk_bytes) {
-            Ok(zip_bytes) => {
-                cleaner::clean_zip_bytes(&zip_bytes, pattern, symbol)?;
-                downloaded.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => {
-                failed.fetch_add(1, Ordering::Relaxed);
+    for (symbol, symbol_urls) in urls {
+        for url in symbol_urls {
+            match download_one(client, url, chunk_bytes) {
+                Ok(zip_bytes) => {
+                    cleaner::clean_zip_bytes(&zip_bytes, pattern, symbol)?;
+                    downloaded.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
