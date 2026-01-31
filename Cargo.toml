@@ -10,5 +10,5 @@ urlencoding = "2.1"
 quick-xml = "0.31"
 regex = "1.10"
 zip = "2.2"
-polars = { version = "0.40", features = ["parquet"] }
+polars = { version = "0.40", features = ["csv", "lazy", "parquet"] }
 anyhow = "1.0"

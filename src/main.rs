@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use polars::functions::concat;
 use polars::prelude::*;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -14,7 +13,7 @@ use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use urlencoding::encode;
-use zip::ZipArchive;
+use ::zip::ZipArchive;
 
 const BASE_URL: &str = "https://data.binance.vision";
 const CLEAN_ROOT: &str = "parquet.binance.vision";
@@ -170,7 +169,7 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
     let mut csv_content = String::new();
     zipped.read_to_string(&mut csv_content)?;
 
-    let mut reader = CsvReader::new(csv_content.as_bytes());
+    let mut reader = CsvReader::new(Cursor::new(csv_content.as_bytes()));
     let mut df = reader
         .has_header(has_header(&csv_content))
         .finish()
@@ -188,9 +187,9 @@ fn clean_zip_bytes(zip_bytes: &[u8], pattern: &str, symbol: &str) -> Result<()> 
     if out_path.exists() {
         let existing = LazyFrame::scan_parquet(&out_path, Default::default())?;
         let combined = concat([existing, df.lazy()], true, true)?.collect()?;
-        let combined = normalize_frame(combined)?;
+        let mut combined = normalize_frame(combined)?;
         let mut file = fs::File::create(&out_path)?;
-        ParquetWriter::new(&mut file).finish(&combined)?;
+        ParquetWriter::new(&mut file).finish(&mut combined)?;
     } else {
         let mut file = fs::File::create(&out_path)?;
         ParquetWriter::new(&mut file).finish(&mut df)?;
