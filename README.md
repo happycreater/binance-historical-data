@@ -40,6 +40,21 @@ And run:
 npx binance-fetch --help
 ```
 
+## Rust 重构版本
+
+本仓库已提供 Rust 实现的高性能下载/清洗入口（用于替代 Python 流程以提升速度）。使用方式：
+
+```shell
+cargo build --release
+BINANCE_PATTERN="data/spot/daily/klines/SYMBOL/1m/" \
+BINANCE_SYMBOL_GLOB="*USDT" \
+BINANCE_DOWNLOAD_WORKERS=32 \
+BINANCE_DOWNLOAD_CHUNK_BYTES=1048576 \
+./target/release/binance-fast
+```
+
+Rust 版流程不会保留 ZIP 文件，仅保留清洗后的 Parquet 结果。
+
 ## Usage
 
 ### Trading data params
@@ -65,6 +80,8 @@ binance-fetch -d 2021-01 2023-12 -p spot -t klines -s btcusdt ethusdt -i 1s 1m 3
 ```
 
 This command downloads `monthly` data for two `symbols` and all `intervals` from `2021-01` to `2023-12` (3 years), which will result in 1152 downloaded files.
+
+更多路径速查见：`docs/data_binance_vision_paths.md`。
 
 #### Possible values
 
