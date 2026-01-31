@@ -38,6 +38,7 @@ cargo build --release
 BINANCE_PATTERN="data/spot/daily/klines/SYMBOL/1m/" \
 BINANCE_SYMBOL_GLOB="*USDT" \
 BINANCE_DOWNLOAD_CHUNK_BYTES=1048576 \
+BINANCE_S3_PROXY="http://127.0.0.1:7890" \
 ./target/release/binance-fast
 ```
 
@@ -48,6 +49,7 @@ BINANCE_DOWNLOAD_CHUNK_BYTES=1048576 \
 | `BINANCE_PATTERN` | 数据目录路径模板，`SYMBOL` 会被实际交易对替换 | `data/spot/daily/klines/SYMBOL/1m/` |
 | `BINANCE_SYMBOL_GLOB` | 交易对通配符过滤（支持 `*`、`?`） | `*USDT` |
 | `BINANCE_DOWNLOAD_CHUNK_BYTES` | 单次下载的读取块大小（字节） | `1048576` |
+| `BINANCE_S3_PROXY` | 目录枚举使用的代理（仅用于 S3 listing 请求，ZIP 下载不走代理） | 空 |
 
 更多路径速查见：`docs/data_binance_vision_paths.md`。
 

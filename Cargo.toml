@@ -12,3 +12,6 @@ regex = "1.10"
 zip = "2.2"
 polars = { version = "0.40", features = ["csv", "lazy", "parquet"] }
 anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"
